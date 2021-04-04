@@ -15,11 +15,13 @@ import com.MAVLink.common.msg_param_request_read;
 import com.MAVLink.common.msg_param_set;
 import com.MAVLink.common.msg_set_mode;
 import com.MAVLink.common.msg_set_position_target_global_int;
+import com.MAVLink.common.msg_file_transfer_protocol;
 import com.MAVLink.common.msg_set_position_target_local_ned;
 import com.MAVLink.enums.MAV_CMD;
 import com.MAVLink.enums.MAV_MISSION_TYPE;
 import com.MAVLink.enums.MAV_RESULT;
 
+import java.io.File;
 import java.util.ArrayList;
 
 import dji.common.flightcontroller.FlightControllerState;
@@ -61,6 +63,7 @@ import static com.MAVLink.enums.MAV_CMD.MAV_CMD_DO_SET_MODE;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_DO_SET_SERVO;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_GET_HOME_POSITION;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_MISSION_START;
+import static com.MAVLink.enums.MAV_CMD.MAV_CMD_OVERRIDE_GOTO;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_NAV_LAND;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_NAV_LOITER_UNLIM;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_NAV_RETURN_TO_LAUNCH;
@@ -70,11 +73,17 @@ import static com.MAVLink.enums.MAV_CMD.MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_VIDEO_START_CAPTURE;
 import static com.MAVLink.enums.MAV_CMD.MAV_CMD_VIDEO_STOP_CAPTURE;
 import static com.MAVLink.enums.MAV_MISSION_TYPE.MAV_MISSION_TYPE_MISSION;
+import static com.MAVLink.common.msg_file_transfer_protocol.MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL;
+import static com.MAVLink.enums.MAV_GOTO.MAV_GOTO_HOLD_AT_SPECIFIED_POSITION;
+import static com.MAVLink.enums.MAV_GOTO.MAV_GOTO_DO_CONTINUE;
+import static com.MAVLink.enums.MAV_GOTO.MAV_GOTO_HOLD_AT_CURRENT_POSITION;
 import static sq.rogue.rosettadrone.util.TYPE_WAYPOINT_DISTANCE;
 import static sq.rogue.rosettadrone.util.TYPE_WAYPOINT_MAX_ALTITUDE;
 import static sq.rogue.rosettadrone.util.TYPE_WAYPOINT_MAX_SPEED;
 import static sq.rogue.rosettadrone.util.TYPE_WAYPOINT_MIN_ALTITUDE;
 import static sq.rogue.rosettadrone.util.TYPE_WAYPOINT_MIN_SPEED;
+import static com.MAVLink.enums.MAV_PROTOCOL_CAPABILITY.MAV_PROTOCOL_CAPABILITY_FTP;
+
 import static sq.rogue.rosettadrone.util.safeSleep;
 
 public class MAVLinkReceiver {
@@ -92,6 +101,7 @@ public class MAVLinkReceiver {
     public boolean curvedFlightPath = true;
     public float flightPathRadius = .2f;
     DroneModel mModel;
+    FTPManager ftpManager;
     private long mTimeStampLastGCSHeartbeat = 0;
     private int mNumGCSWaypoints = 0;
     private int wpState = 0;
@@ -186,6 +196,51 @@ public class MAVLinkReceiver {
                     case MAV_CMD_MISSION_START:
                         mModel.startWaypointMission();
                         break;
+                    case MAV_CMD_OVERRIDE_GOTO:
+                        parent.logMessageDJI("Received MAV: MAV_CMD_OVERRIDE_GOTO");
+                        if (mModel.getSystemId() != msg_cmd.target_system) {
+                            break;
+                        }
+                        mModel.pauseWaypointMission();
+                        if (msg_cmd.param2 == MAV_GOTO_HOLD_AT_CURRENT_POSITION) {
+                            int x = (int) mModel.get_current_lat();
+                            int y = (int) mModel.get_current_lon();
+                            int z = (int) mModel.get_current_alt();
+
+                            Log.d(TAG, "Lat = " + x);
+                            Log.d(TAG, "Lon = " + y);
+                            Log.d(TAG, "ALT = " + z);
+                            mModel.do_set_motion_absolute(
+                                    (double) x,
+                                    (double) y,
+                                    z,
+                                    msg_cmd.param4,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0b0000111111111000);
+                        } else if (msg_cmd.param2 == MAV_GOTO_HOLD_AT_SPECIFIED_POSITION) {
+
+                            Log.d(TAG, "Lat = " + msg_cmd.param5);
+                            Log.d(TAG, "Lon = " + msg_cmd.param6);
+                            Log.d(TAG, "ALT = " + msg_cmd.param7);
+                            mModel.do_set_motion_absolute(
+                                    (double) msg_cmd.param5,
+                                    (double) msg_cmd.param6,
+                                    msg_cmd.param7,
+                                    msg_cmd.param4,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0b0000111111111000);
+                        }
+                        if(msg_cmd.param1 == MAV_GOTO_DO_CONTINUE) {
+                            mModel.resumeWaypointMission();
+                        }
+                        mModel.send_command_ack(MAV_CMD_OVERRIDE_GOTO, MAV_RESULT.MAV_RESULT_ACCEPTED);
+                        break;
                     case MAV_CMD_CONDITION_YAW:
                         Log.d(TAG, "Yaw = " + msg_cmd.param1);
 
@@ -208,6 +263,11 @@ public class MAVLinkReceiver {
                         break;
                     case MAV_CMD_DO_SET_SERVO:
                         mModel.do_set_Gimbal(msg_cmd.param1, msg_cmd.param2);
+                        break;
+                    //                        CUSTOM
+                    case MAV_PROTOCOL_CAPABILITY_FTP:
+                        parent.logMessageDJI("Received MAV: MAV_PROTOCOL_CAPABILITY_FTP");
+                        mModel.send_command_ack(MAV_PROTOCOL_CAPABILITY_FTP, MAV_RESULT.MAV_RESULT_ACCEPTED);
                         break;
                     // JUMP is just a test function to enter the Timeline...
                     case MAV_CMD_DO_JUMP:
@@ -490,6 +550,14 @@ public class MAVLinkReceiver {
                 if (ym != null) {
                     ym.getWaypointList().clear();
                 }
+                break;
+            case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
+                msg_file_transfer_protocol msg_ftp_item = (msg_file_transfer_protocol) msg;
+                ftpManager.manage_ftp(msg_ftp_item);
+                break;
+            default:
+                parent.logMessageDJI("Received (unkown) message");
+                parent.logMessageDJI( String.valueOf(msg.msgid));
                 break;
         }
     }
